@@ -8293,6 +8293,7 @@ def index() -> HTMLResponse:
       <div>
         {history_link}
         {offline_link}
+        <div id="update-notification-container"></div>
       </div>
     </div>
   </div>
@@ -8825,8 +8826,11 @@ def jobs_history() -> HTMLResponse:
       <h1>Son işlemler.</h1>
     </section>
     <section class="card">
-      <div class="actions" style="margin-bottom:12px;">
+      <div class="actions" style="margin-bottom:12px; display:flex; gap:8px;">
         <a class="btn ghost" href="/">Ana sayfa</a>
+        <form action="/jobs/history/clear" method="post" onsubmit="return confirm('Tüm iş geçmişini ve işlenmiş PDF dosyalarını kalıcı olarak silmek istediğinize emin misiniz? Bu işlem geri alınamaz.');" style="display:inline-block; margin:0;">
+          <button type="submit" class="btn" style="background:#7f0000; color:#fff; border-color:#ff8080 #400000 #400000 #ff8080;">🗑️ Geçmişi Temizle</button>
+        </form>
       </div>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse;">
@@ -8848,6 +8852,17 @@ def jobs_history() -> HTMLResponse:
     </section>
     """
     return page_shell("İş geçmişi", body)
+
+
+@app.post("/jobs/history/clear")
+def clear_jobs_history() -> RedirectResponse:
+    if not LOCAL_MODE:
+        raise HTTPException(status_code=403, detail="İş geçmişini temizleme sadece lokal modda yapılabilir")
+    ensure_dir(JOBS_ROOT)
+    for child in JOBS_ROOT.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+    return RedirectResponse(url="/jobs/history", status_code=303)
 
 
 @app.post("/upload", response_class=HTMLResponse)
