@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import os
 import socket
 import sys
@@ -7,12 +8,123 @@ import time
 import urllib.request
 import ssl
 import platform
+import re
+import shutil
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 import uvicorn
 
 # Set application envs for desktop mode
 os.environ["PDF_CUT_LOCAL_MODE"] = "true"
 os.environ["PDF_CUT_FEEDBACK_MODE"] = "true"
+
+
+SEED_MEMORY_FILES = ("memory.json", "manual_feedback.json")
+
+
+class DesktopDownloadApi:
+    """Save local job downloads without navigating the desktop webview."""
+
+    _ALLOWED_PATH = re.compile(r"^/jobs/[A-Za-z0-9_-]+/download/(?:all|log|file)(?:\?.*)?$")
+
+    def __init__(self, port: int):
+        self.base_url = f"http://127.0.0.1:{port}/"
+        self.window = None
+
+    def save_download(self, relative_url: str, suggested_filename: str) -> dict[str, object]:
+        try:
+            parsed = urlsplit(str(relative_url or ""))
+            request_target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            if parsed.scheme or parsed.netloc or not self._ALLOWED_PATH.fullmatch(request_target):
+                raise ValueError("Geçersiz indirme adresi")
+
+            safe_name = Path(str(suggested_filename or "indirilen_dosya")).name
+            if not safe_name or safe_name in {".", ".."}:
+                safe_name = "indirilen_dosya"
+            if self.window is None:
+                raise RuntimeError("Masaüstü penceresi hazır değil")
+
+            import webview
+
+            destination = self.window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                save_filename=safe_name,
+            )
+            if not destination:
+                return {"ok": True, "cancelled": True}
+            if isinstance(destination, (tuple, list)):
+                destination = destination[0]
+
+            with urllib.request.urlopen(urljoin(self.base_url, request_target), timeout=120) as response:
+                with Path(destination).open("wb") as output:
+                    shutil.copyfileobj(response, output)
+            return {"ok": True, "cancelled": False, "path": str(destination)}
+        except Exception as exc:
+            print(f"[DesktopDownload] İndirme kaydedilemedi: {exc}", flush=True)
+            return {"ok": False, "cancelled": False, "error": str(exc)}
+
+
+def _merge_missing_values(local: object, seed: object) -> object:
+    """Recursively add seed values while keeping every local user value."""
+    if not isinstance(local, dict) or not isinstance(seed, dict):
+        return local
+    for key, seed_value in seed.items():
+        if key not in local:
+            local[key] = seed_value
+        else:
+            local[key] = _merge_missing_values(local[key], seed_value)
+    return local
+
+
+def seed_offline_learning_memory(data_dir: Path, resource_root: Path) -> int:
+    """Merge bundled server-learned profiles into local storage once/version."""
+    seed_dir = resource_root / "seed_crop_memory"
+    if not seed_dir.exists():
+        # Source-tree desktop runs use the repository's current learned data.
+        source_seed_dir = resource_root / "crop_memory"
+        if source_seed_dir.exists() and source_seed_dir.resolve() != (data_dir / "crop_memory").resolve():
+            seed_dir = source_seed_dir
+        else:
+            return 0
+
+    version_paths = (resource_root / "VERSION", resource_root / "app" / "VERSION")
+    version = next(
+        (path.read_text(encoding="utf-8").strip() for path in version_paths if path.exists()),
+        "development",
+    )
+    marker = data_dir / "crop_memory" / ".seed-version"
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == version:
+        return 0
+
+    target_dir = data_dir / "crop_memory"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    merged_files = 0
+    for filename in SEED_MEMORY_FILES:
+        seed_path = seed_dir / filename
+        if not seed_path.exists():
+            continue
+        try:
+            seed_payload = json.loads(seed_path.read_text(encoding="utf-8"))
+            target_path = target_dir / filename
+            if target_path.exists():
+                local_payload = json.loads(target_path.read_text(encoding="utf-8"))
+            else:
+                local_payload = {"version": seed_payload.get("version", 1), "profiles": {}}
+            merged_payload = _merge_missing_values(local_payload, seed_payload)
+            temp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+            temp_path.write_text(
+                json.dumps(merged_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp_path.replace(target_path)
+            merged_files += 1
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[SeedMemory] {filename} birleştirilemedi: {exc}", flush=True)
+
+    if merged_files:
+        marker.write_text(version + "\n", encoding="utf-8")
+        print(f"[SeedMemory] {merged_files} öğrenme belleği dosyası yerel profile eklendi.", flush=True)
+    return merged_files
 
 
 def application_data_dir() -> Path:
@@ -66,6 +178,7 @@ def configure_offline_environment() -> None:
 
     resource_root = bundled_resource_root()
     os.environ["PDF_CUT_BUNDLE_ROOT"] = str(resource_root)
+    seed_offline_learning_memory(data_dir, resource_root)
     system = platform.system().lower()
     platform_dir = "mac" if system == "darwin" else ("win" if system == "windows" else "linux")
     bin_dir = resource_root / "bin" / platform_dir
@@ -233,14 +346,17 @@ def main():
         retries -= 1
 
     # Create PyWebView window pointing to the local FastAPI app
+    download_api = DesktopDownloadApi(port)
     window = webview.create_window(
         "PDF Soru Kesim Otomasyonu",
         f"http://127.0.0.1:{port}",
         width=1280,
         height=850,
         min_size=(1024, 768),
-        background_color="#ffffff"
+        background_color="#ffffff",
+        js_api=download_api,
     )
+    download_api.window = window
 
     def on_closed():
         print("Desktop app window closed. Exiting server...", flush=True)

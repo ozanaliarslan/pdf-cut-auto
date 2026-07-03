@@ -2709,8 +2709,25 @@ def easy_editor_html_page(data: dict) -> str:
       }
     }
 
-    function downloadLogs(event) {
+    async function saveWithDesktopBridge(url, filename) {
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || typeof api.save_download !== 'function') return false;
+      const result = await api.save_download(url, filename);
+      if (!result || !result.ok) {
+        throw new Error((result && result.error) || 'Dosya kaydedilemedi.');
+      }
+      return true;
+    }
+
+    async function downloadLogs(event) {
       if (event) event.stopPropagation();
+      const filename = `job_${jobId}_logs.txt`;
+      try {
+        if (await saveWithDesktopBridge(`/jobs/${jobId}/download/log`, filename)) return;
+      } catch (err) {
+        await showAlert("Log kaydı indirilemedi: " + err.message);
+        return;
+      }
       const logConsole = document.getElementById('log-console');
       if (!logConsole) return;
       const logText = logConsole.textContent || logConsole.innerText || "";
@@ -2719,7 +2736,7 @@ def easy_editor_html_page(data: dict) -> str:
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `job_${jobId}_logs.txt`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -2967,7 +2984,10 @@ def easy_editor_html_page(data: dict) -> str:
     renderTestNavigation();
     renderTestSelectors();
     // Detect custom numbering
-    let hasCustomNumbering = false;
+    // Automatic analysis already extracted the printed question numbers.
+    // Preserve them even when a question is missed; spatial re-numbering would
+    // silently shift every following label to the wrong source question.
+    let hasCustomNumbering = serverData.workflow_mode !== 'manual';
     const testGroups = {};
     questions.forEach(q => {
       if (!testGroups[q.test_no]) testGroups[q.test_no] = [];
@@ -4624,7 +4644,15 @@ def easy_editor_html_page(data: dict) -> str:
           btn.style.opacity = '1';
           btn.style.cursor = 'pointer';
         }
-        window.location.href = `/jobs/${jobId}/download/all`;
+        const downloadUrl = `/jobs/${jobId}/download/all`;
+        const downloadName = `${jobId}_test_pdfs.zip`;
+        try {
+          if (!await saveWithDesktopBridge(downloadUrl, downloadName)) {
+            window.location.href = downloadUrl;
+          }
+        } catch (err) {
+          await showAlert("PDF arşivi indirilemedi: " + err.message);
+        }
       })
       .catch(async (err) => {
         const btn = document.getElementById('btn-save-edits');
