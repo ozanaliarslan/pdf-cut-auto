@@ -3216,17 +3216,21 @@ def source_page_layout_for_row(job_dir: Path, row: dict[str, str | int], page_id
     ensure_dir(cache_dir)
     xml_path = cache_dir / f"source_page_{page_no}.xml"
     if not xml_path.exists():
+        # `-stdout` is essential here. Some Poppler/PDF combinations otherwise
+        # create hundreds of thousands of tiny image fragments despite `-i`.
+        # The editor only needs page/text geometry, so persist the compact XML.
         result = subprocess.run(
             [
                 "pdftohtml",
+                "-q",
                 "-xml",
                 "-i",
+                "-stdout",
                 "-f",
                 str(page_no),
                 "-l",
                 str(page_no),
                 str(pdf_path),
-                str(xml_path),
             ],
             capture_output=True,
             text=True,
@@ -3234,8 +3238,15 @@ def source_page_layout_for_row(job_dir: Path, row: dict[str, str | int], page_id
             errors="replace",
             env=processor_env(),
         )
-        if result.returncode != 0 or not xml_path.exists():
+        if result.returncode != 0 or not result.stdout.strip():
             raise HTTPException(status_code=500, detail=result.stderr or result.stdout or "Sayfa bilgisi okunamadı")
+
+        compact_xml = "".join(
+            line for line in result.stdout.splitlines(keepends=True) if not line.lstrip().startswith("<image ")
+        )
+        staged_xml = xml_path.with_suffix(".xml.tmp")
+        staged_xml.write_text(compact_xml, encoding="utf-8")
+        staged_xml.replace(xml_path)
     root = ET.parse(xml_path).getroot()
     page_el = root.find("page")
     if page_el is None:
