@@ -3565,64 +3565,6 @@ def get_adjusted_crop_left(
     return new_left
 
 
-def mask_question_number_on_crop(
-    job_dir: Path,
-    row: dict[str, str | int],
-    crop: Image.Image,
-    bounds: dict[str, float],
-    *,
-    page_idx: int | None = None,
-) -> None:
-    soru_no = int(row.get("soru_no") or 0)
-    if soru_no <= 0:
-        return
-    page_idx = int(row.get("page_idx") or 0) if page_idx is None else int(page_idx)
-    crop_left = float(bounds["crop_left"])
-    crop_top = float(bounds["crop_top"])
-    crop_right = float(bounds["crop_right"])
-    crop_bottom = float(bounds["crop_bottom"])
-    scale_x = crop.width / max(1.0, crop_right - crop_left)
-    scale_y = crop.height / max(1.0, crop_bottom - crop_top)
-    label_prefixes = (f"{soru_no}.", f"{soru_no} .", f"{soru_no})")
-    candidates = []
-    for item in source_page_text_items(job_dir, row, page_idx):
-        text = str(item["text"]).strip()
-        if not text.startswith(label_prefixes) and text != str(soru_no):
-            continue
-        left = float(item["left"])
-        top = float(item["top"])
-        right = float(item["right"])
-        bottom = float(item["bottom"])
-        if right <= crop_left or left >= crop_right or bottom <= crop_top or top >= crop_bottom:
-            continue
-        candidates.append(item)
-
-    if not candidates:
-        return
-
-    draw = ImageDraw.Draw(crop)
-
-    item = min(candidates, key=lambda candidate: (abs(float(candidate["top"]) - crop_top), float(candidate["left"])))
-    item_left = float(item["left"])
-    item_top = float(item["top"])
-    item_right = float(item["right"])
-    item_bottom = float(item["bottom"])
-    item_height = max(8.0, float(item["height"]))
-    text = str(item["text"]).strip()
-    if text.startswith(label_prefixes):
-        is_pure_label = bool(re.match(r"^[0-9.\s()]+$", text))
-        if not is_pure_label:
-            digit_count = len(str(soru_no))
-            item_right = min(item_right, item_left + item_height * (0.50 + digit_count * 0.30))
-    pad = max(3.0, item_height * 0.18)
-    left = max(0, int((item_left - pad - crop_left) * scale_x))
-    top = max(0, int((item_top - pad - crop_top) * scale_y))
-    right = min(crop.width, int((item_right + pad - crop_left) * scale_x))
-    bottom = min(crop.height, int((item_bottom + pad - crop_top) * scale_y))
-    if right > left and bottom > top:
-        draw.rectangle((left, top, right, bottom), fill="white")
-
-
 def row_common_stem_payload(row: dict[str, str | int]) -> dict[str, float | int | str] | None:
     try:
         page_idx = int(row.get("common_stem_page_idx"))
@@ -3667,8 +3609,9 @@ def compose_question_image_from_row(job_id: str, row_id: int, *, dpi: int = 450)
             question_bounds["crop_left"] = adjusted_left
             question_crop = crop_row_page_bounds_to_image(job_dir, row, int(row["page_idx"]), question_bounds, dpi=dpi)
         else:
+            # A safe left-edge crop was not possible without cutting content.
+            # Keep the printed number; never cover source pixels with white.
             question_crop = crop_row_page_bounds_to_image(job_dir, row, int(row["page_idx"]), question_bounds, dpi=dpi)
-            mask_question_number_on_crop(job_dir, row, question_crop, question_bounds)
     else:
         question_crop = crop_row_page_bounds_to_image(job_dir, row, int(row["page_idx"]), question_bounds, dpi=dpi)
         
@@ -3764,9 +3707,6 @@ def source_crop_image(job_id: str, row_id: int) -> Path:
     target_path = cache_dir / f"manual_crop_{digest}.png"
     if not target_path.exists():
         crop = crop_bounds_to_image(job_id, row_id, bounds, dpi=150)
-        if int(row.get("question_number_hidden") or 0) and adjusted_left == float(row["crop_left"]):
-            mask_question_number_on_crop(job_dir, row, crop, bounds)
-        
         for sub in sub_crops:
             sub_bounds = {
                 "crop_left": float(sub["crop_left"]),
@@ -7668,6 +7608,17 @@ def index() -> HTMLResponse:
         if LOCAL_MODE
         else '<a class="btn-offline" href="/offline">⬇️ Çevrimdışı Kullan</a>'
     )
+    local_quality_note = (
+        """
+        <div class="info-box" style="margin-top:12px; border-color:#10b981;">
+          <h3>🔒 Yerel ve tam kalite</h3>
+          <p>PDF yalnızca bu bilgisayarda işlenir; sunucuya gönderilmez.</p>
+          <p style="margin-top:8px;">Gerekli kesim kütüphaneleri ve öğrenilmiş profiller pakete dahildir. İnternet varsa yalnızca yeni yerel kesim motoru sürümü kontrol edilir.</p>
+        </div>
+        """
+        if LOCAL_MODE
+        else ""
+    )
     font_links = "" if LOCAL_MODE else """
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -8294,6 +8245,7 @@ def index() -> HTMLResponse:
         {history_link}
         {offline_link}
         <div id="update-notification-container"></div>
+        {local_quality_note}
       </div>
     </div>
   </div>
@@ -8362,7 +8314,7 @@ def index() -> HTMLResponse:
                   <span class="option-desc">Soru numaralarını otomatik olarak gizler</span>
                 </div>
                 <label class="switch">
-                  <input type="checkbox" id="opt-hide-numbers" checked>
+                  <input type="checkbox" id="opt-hide-numbers">
                   <span class="slider"></span>
                 </label>
               </div>
@@ -8769,6 +8721,7 @@ def index() -> HTMLResponse:
     html_content = html_content.replace("{font_links}", font_links)
     html_content = html_content.replace("{history_link}", history_link)
     html_content = html_content.replace("{offline_link}", offline_link)
+    html_content = html_content.replace("{local_quality_note}", local_quality_note)
     return HTMLResponse(html_content)
 
 

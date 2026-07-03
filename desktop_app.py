@@ -266,13 +266,18 @@ def check_for_updates(window):
             local_version = version_file.read_text(encoding="utf-8").strip()
 
         # Fetch remote version from GitHub
-        url = "https://raw.githubusercontent.com/ozanaliarslan/pdf-cut-auto/master/VERSION"
+        # Use the explicit ref path. GitHub's short /master/ raw URL can keep an
+        # older VERSION response cached briefly after a release is pushed.
+        url = "https://raw.githubusercontent.com/ozanaliarslan/pdf-cut-auto/refs/heads/master/VERSION"
         
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "PDF-Kesim-Offline", "Cache-Control": "no-cache"},
+        )
         with urllib.request.urlopen(req, timeout=3.0, context=ctx) as response:
             remote_version = response.read().decode('utf-8').strip()
 
